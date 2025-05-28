@@ -13,6 +13,7 @@ class SlotMachine {
         this.isSpinning = false;
         this.reelsCount = 5;
         this.symbolsPerReel = 3;
+        this.symbolsOnReel = 3; // Новое свойство: всего символов на барабане для анимации
         this.symbolSize = 200;
         this.reelGap = 10; // расстояние между барабанами
         this.reels = [];
@@ -115,14 +116,14 @@ class SlotMachine {
             this.reels.push(reel);
 
             const reelSymbols = [];
-            for (let j = 0; j < this.symbolsPerReel; j++) {
+            for (let j = 0; j < this.symbolsOnReel; j++) {
                 const symbolData = this.symbolsData[Math.floor(Math.random() * this.symbolsData.length)];
                 const symbol = new PIXI.Sprite(symbolData.texture);
-                symbol.anchor.set(0.5, 0.5); // ВЫРАВНИВАНИЕ ПО ЦЕНТРУ
-                symbol.x = this.symbolSize / 2;
-                symbol.y = j * this.symbolSize + this.symbolSize / 2;
+                symbol.anchor.set(0.5, 0.5);
                 symbol.width = this.symbolSize;
                 symbol.height = this.symbolSize;
+                symbol.x = this.symbolSize / 2;
+                symbol.y = j * this.symbolSize + this.symbolSize / 2;
                 reel.addChild(symbol);
                 reelSymbols.push(symbol);
             }
@@ -150,6 +151,9 @@ class SlotMachine {
         this.isSpinning = true;
         document.getElementById('spinButton').disabled = true;
         document.getElementById('serverResponse').textContent = '';
+        // Новый массив скоростей для каждого барабана
+        this.reelSpeeds = Array(this.reelsCount).fill(25);
+        this.stopping = Array(this.reelsCount).fill(false);
         this.spinAnimation();
         const serverData = await this.fetchServerResponse();
         await this.stopReels(serverData);
@@ -157,17 +161,25 @@ class SlotMachine {
 
     spinAnimation() {
         if (!this.isSpinning) return;
+        let stillSpinning = false;
         this.reels.forEach((reel, reelIndex) => {
+            if (this.stopping && this.stopping[reelIndex]) return;
+            stillSpinning = true;
+            let speed = this.reelSpeeds[reelIndex];
             this.symbols[reelIndex].forEach((symbol, j) => {
-                symbol.y += 10;
-                if (symbol.y >= this.symbolSize * this.symbolsPerReel + this.symbolSize / 2) {
-                    symbol.y = symbol.y - this.symbolSize * this.symbolsPerReel;
+                symbol.y += speed;
+                // Если символ полностью вышел за нижнюю границу, переносим его строго над верхним
+                while (symbol.y - this.symbolSize / 2 >= this.symbolSize * this.symbolsOnReel) {
+                    let minY = Math.min(...this.symbols[reelIndex].map(s => s.y));
+                    symbol.y = minY - this.symbolSize;
                     const symbolData = this.symbolsData[Math.floor(Math.random() * this.symbolsData.length)];
                     symbol.texture = symbolData.texture;
                 }
             });
         });
-        requestAnimationFrame(() => this.spinAnimation());
+        if (stillSpinning) {
+            requestAnimationFrame(() => this.spinAnimation());
+        }
     }
 
     async stopReels(serverData) {
@@ -176,55 +188,45 @@ class SlotMachine {
         }
         for (let i = 0; i < this.reels.length; i++) {
             await new Promise(resolve => {
-                setTimeout(() => {
-                    this.symbols[i].forEach(symbol => {
-                        gsap.to(symbol, {
-                            y: symbol.y + 20,
-                            duration: 0.25,
-                            yoyo: true,
-                            repeat: 1,
-                            ease: "power2.out"
-                        });
-                    });
-                    resolve();
-                }, i * 200);
-            });
+                let interval = setInterval(() => {
+                    if (this.reelSpeeds[i] > 2) {
+                        this.reelSpeeds[i] *= 0.85;
+                    } else {
+                        clearInterval(interval);
+                        this.stopping[i] = true;
+                        // Сортируем по y
+                        this.symbols[i].sort((a, b) => a.y - b.y);
+                        // Выставляем ровно по линиям только центральные 3 символа
+                        const offset = Math.floor((this.symbolsOnReel - this.symbolsPerReel) / 2);
+                        for (let j = 0; j < this.symbolsOnReel; j++) {
+                            let targetY;
+                            if (j >= offset && j < offset + this.symbolsPerReel) {
+                                targetY = (j - offset) * this.symbolSize + this.symbolSize / 2;
+                            } else {
+                                // Прячем запасные символы за пределами видимой области
+                                targetY = -1000;
+                            }
+                            gsap.to(this.symbols[i][j], {
+                                y: targetY,
+                                duration: 0.3,
+                                ease: "power2.out",
+                                onComplete: () => {
+                                    if (j === this.symbolsOnReel - 1) resolve();
+                                }
+                            });
+                        }
+                    }
+                }, 40);
+            }, i * 350);
         }
-        // После остановки сортируем символы по y и пересобираем контейнеры
-        for (let i = 0; i < this.reels.length; i++) {
-            // Сортируем массив символов по y
-            this.symbols[i].sort((a, b) => a.y - b.y);
-            // Удаляем все символы из контейнера
-            while (this.reels[i].children.length > 0) {
-                this.reels[i].removeChildAt(0);
-            }
-            // Добавляем обратно в правильном порядке и выставляем координаты по X
-            for (let j = 0; j < this.symbolsPerReel; j++) {
-                const symbol = this.symbols[i][j];
-                symbol.anchor.set(0.5, 0.5);
-                symbol.x = this.symbolSize / 2;
-                // Y будет выставлен ниже для всех символов с одинаковым индексом
-                this.reels[i].addChild(symbol);
-            }
-        }
-        // ГАРАНТИРОВАННОЕ ВЫРАВНИВАНИЕ ПО ГОРИЗОНТАЛИ ДЛЯ КАЖДОГО РЯДА
+        // После остановки всех барабанов выравниваем центральную линию
         for (let j = 0; j < this.symbolsPerReel; j++) {
             const rowY = j * this.symbolSize + this.symbolSize / 2;
             for (let i = 0; i < this.reelsCount; i++) {
-                this.symbols[i][j].y = rowY;
+                const offset = Math.floor((this.symbolsOnReel - this.symbolsPerReel) / 2);
+                this.symbols[i][j + offset].y = rowY;
             }
         }
-        // После остановки выравниваем барабаны по горизонтали
-        for (let i = 0; i < this.reels.length; i++) {
-            this.reels[i].x = i * (this.symbolSize + this.reelGap);
-        }
-        // Центрируем контейнер барабанов по ширине
-        this.centerReelsContainer();
-        // Сортируем барабаны по x и пересобираем массивы
-        const reelsWithSymbols = this.reels.map((reel, i) => ({ reel, symbols: this.symbols[i] }));
-        reelsWithSymbols.sort((a, b) => a.reel.x - b.reel.x);
-        this.reels = reelsWithSymbols.map(obj => obj.reel);
-        this.symbols = reelsWithSymbols.map(obj => obj.symbols);
         this.isSpinning = false;
         document.getElementById('spinButton').disabled = false;
     }
